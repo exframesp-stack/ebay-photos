@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="eBay Photos">
+<meta name="theme-color" content="#ffffff">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="manifest" href="manifest.json">
+<title>eBay Photos</title>
+<style>
+  :root { --ink:#1a1a1a; --muted:#6b6b6b; --line:#e3e3e3; --accent:#0a66ff; --ok:#1e8e3e; --bad:#c5221f; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; font:17px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color:var(--ink); background:#fff;
+         padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
+  h1 { font-size:22px; margin:4px 0 2px; }
+  .sub { color:var(--muted); font-size:14px; margin-bottom:16px; }
+  .btn { display:block; width:100%; border:0; border-radius:14px; padding:18px; font-size:19px; font-weight:600; margin:10px 0; }
+  .primary { background:var(--accent); color:#fff; }
+  .secondary { background:#f1f3f5; color:var(--ink); }
+  .upload { background:var(--ok); color:#fff; }
+  .btn:disabled { opacity:.45; }
+  .grid { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin:12px 0; }
+  .grid div { position:relative; aspect-ratio:1; border-radius:8px; overflow:hidden; background:#f1f3f5; }
+  .grid img { width:100%; height:100%; object-fit:cover; }
+  .grid span { position:absolute; inset:auto 0 0 0; font-size:11px; text-align:center; background:rgba(255,255,255,.85); }
+  .grid .done span { color:var(--ok); } .grid .fail span { color:var(--bad); }
+  .bar { height:8px; background:#f1f3f5; border-radius:4px; overflow:hidden; margin:8px 0; }
+  .bar i { display:block; height:100%; width:0; background:var(--ok); transition:width .2s; }
+  #status { min-height:22px; font-size:15px; color:var(--muted); }
+  .count { font-size:15px; color:var(--muted); }
+  details { margin-top:28px; border-top:1px solid var(--line); padding-top:12px; }
+  summary { color:var(--muted); font-size:15px; }
+  input[type=password], input[type=text] { width:100%; font-size:16px; padding:12px; border:1px solid var(--line); border-radius:10px; margin:8px 0; }
+  .hidden { display:none; }
+  .tip { font-size:14px; color:var(--muted); }
+</style>
+</head>
+<body>
+  <h1>eBay Photos</h1>
+  <div class="sub">Shoot each pair together, front view first, plus one close-up of the temple print.</div>
+
+  <div id="setup" class="hidden">
+    <p><b>One-time setup:</b> paste the GitHub key for <b>exframesp-stack/ebay-photos</b>. It stays on this phone only.</p>
+    <input id="tok" type="password" placeholder="github_pat_…" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button class="btn primary" id="saveTok">Save key</button>
+    <div id="setupMsg" class="tip"></div>
+  </div>
+
+  <div id="main" class="hidden">
+    <button class="btn primary" id="cam">📷 Take photo</button>
+    <button class="btn secondary" id="lib">Choose from library</button>
+    <input id="camIn" type="file" accept="image/*" capture="environment" class="hidden">
+    <input id="libIn" type="file" accept="image/*" multiple class="hidden">
+
+    <div class="count" id="count">No photos waiting.</div>
+    <div class="grid" id="grid"></div>
+    <div class="bar"><i id="prog"></i></div>
+    <button class="btn upload" id="up" disabled>Upload</button>
+    <div id="status"></div>
+
+    <details>
+      <summary>Settings</summary>
+      <p class="tip">Uploads go to github.com/exframesp-stack/ebay-photos in the <b>inbox</b> folder. Photos are resized to 2000 px and saved as JPG.</p>
+      <button class="btn secondary" id="test">Test connection</button>
+      <button class="btn secondary" id="forget">Remove key from this phone</button>
+    </details>
+  </div>
+
+<script>
+const OWNER = "exframesp-stack", REPO = "ebay-photos", BRANCH = "main", MAX = 2000;
+const $ = id => document.getElementById(id);
+let queue = [];   // {file, url, taken, state}
+const tokenKey = "ebayPhotosToken";
+const getTok = () => { try { return localStorage.getItem(tokenKey) || ""; } catch (e) { return ""; } };
+
+function show() {
+  const has = !!getTok();
+  $("setup").classList.toggle("hidden", has);
+  $("main").classList.toggle("hidden", !has);
+}
+
+async function api(method, path, body) {
+  const r = await fetch(`https://api.github.com/repos/${OWNER}/${REPO}${path}`, {
+    method, headers: { "Authorization": "Bearer " + getTok(), "Accept": "application/vnd.github+json",
+                       "X-GitHub-Api-Version": "2022-11-28" },
+    body: body ? JSON.stringify(body) : undefined });
+  let j = {}; try { j = await r.json(); } catch (e) {}
+  return { ok: r.ok, status: r.status, j };
+}
+
+$("saveTok").onclick = async () => {
+  const t = $("tok").value.trim();
+  if (!/^(github_pat_|ghp_)/.test(t)) { $("setupMsg").textContent = "That doesn't look like a GitHub key."; return; }
+  try { localStorage.setItem(tokenKey, t); } catch (e) { $("setupMsg").textContent = "Couldn't save on this phone."; return; }
+  $("setupMsg").textContent = "Checking…";
+  const r = await api("GET", "");
+  if (!r.ok) { localStorage.removeItem(tokenKey); $("setupMsg").textContent = "GitHub refused this key (" + r.status + ")."; return; }
+  $("tok").value = ""; show();
+};
+$("forget").onclick = () => { localStorage.removeItem(tokenKey); show(); };
+$("test").onclick = async () => {
+  $("status").textContent = "Testing…";
+  const r = await api("GET", "");
+  $("status").textContent = r.ok ? "Connected to " + OWNER + "/" + REPO + "." : "Not connected (" + r.status + ").";
+};
+
+$("cam").onclick = () => $("camIn").click();
+$("lib").onclick = () => $("libIn").click();
+$("camIn").onchange = e => { add(e.target.files); e.target.value = ""; };
+$("libIn").onchange = e => { add(e.target.files); e.target.value = ""; };
+
+function add(files) {
+  for (const f of files) {
+    // camera photos: lastModified = moment taken; keeps pairs grouped by time
+    queue.push({ file: f, url: URL.createObjectURL(f), taken: f.lastModified || Date.now(), state: "wait" });
+  }
+  draw();
+}
+
+function draw() {
+  const waiting = queue.filter(q => q.state !== "done").length;
+  $("count").textContent = waiting ? waiting + " photo" + (waiting > 1 ? "s" : "") + " waiting to upload." : "No photos waiting.";
+  $("up").disabled = !waiting;
+  $("grid").innerHTML = "";
+  queue.forEach((q, i) => {
+    const d = document.createElement("div");
+    d.className = q.state;
+    d.innerHTML = `<img src="${q.url}"><span>${q.state === "done" ? "✓ sent" : q.state === "fail" ? "retry" : q.state === "busy" ? "…" : i + 1}</span>`;
+    $("grid").appendChild(d);
+  });
+}
+
+function toJpegBase64(file) {
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => {
+      let w = img.naturalWidth, h = img.naturalHeight;
+      const s = Math.min(1, MAX / Math.max(w, h)); w = Math.round(w * s); h = Math.round(h * s);
+      const c = document.createElement("canvas"); c.width = w; c.height = h;
+      c.getContext("2d").drawImage(img, 0, 0, w, h);
+      c.toBlob(b => {
+        if (!b) return rej(new Error("convert failed"));
+        const r = new FileReader(); r.onload = () => res(r.result.split(",")[1]); r.onerror = rej; r.readAsDataURL(b);
+      }, "image/jpeg", 0.9);
+    };
+    img.onerror = () => rej(new Error("can't read photo"));
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+const pad = n => String(n).padStart(2, "0");
+function nameFor(q, n) {
+  const d = new Date(q.taken);
+  const day = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const t = `${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}-${String(d.getMilliseconds()).padStart(3, "0")}`;
+  return `inbox/${day}/${t}-${Math.random().toString(36).slice(2, 6)}.jpg`;
+}
+
+$("up").onclick = async () => {
+  $("up").disabled = true; $("cam").disabled = $("lib").disabled = true;
+  const todo = queue.filter(q => q.state !== "done");
+  let sent = 0, failed = 0;
+  for (const q of todo) {
+    q.state = "busy"; draw();
+    try {
+      const content = await toJpegBase64(q.file);
+      let ok = false;
+      for (let a = 0; a < 3 && !ok; a++) {
+        const r = await api("PUT", "/contents/" + nameFor(q), { message: "photo " + new Date(q.taken).toISOString(), branch: BRANCH, content });
+        ok = r.ok; if (!ok) await new Promise(z => setTimeout(z, 2000));
+      }
+      q.state = ok ? "done" : "fail"; ok ? sent++ : failed++;
+    } catch (e) { q.state = "fail"; failed++; }
+    $("prog").style.width = Math.round(100 * (sent + failed) / todo.length) + "%";
+    draw();
+  }
+  $("status").textContent = failed ? `${sent} sent, ${failed} failed — tap Upload to retry.` : `All ${sent} photos sent.`;
+  if (!failed) { queue.forEach(q => URL.revokeObjectURL(q.url)); queue = []; setTimeout(() => { $("prog").style.width = "0"; draw(); }, 1500); }
+  $("cam").disabled = $("lib").disabled = false; draw();
+};
+
+show(); draw();
+</script>
+</body>
+</html>
