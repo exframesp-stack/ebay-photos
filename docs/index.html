@@ -46,6 +46,13 @@
   #camThumb { width:56px; height:56px; border-radius:8px; object-fit:cover; background:#222; border:2px solid #fff; }
   #camCount { position:absolute; top:max(14px, env(safe-area-inset-top)); left:0; right:0; text-align:center; color:#fff; font-size:16px; font-weight:600; text-shadow:0 1px 3px #000; }
   #camView.hidden { display:none; }
+  #vidWrap { flex:1; position:relative; overflow:hidden; min-height:0; touch-action:none; }
+  #vidWrap video { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; transform-origin:center; }
+  #zoomBar { display:flex; gap:10px; justify-content:center; padding:10px 0 4px; background:#000; }
+  #zoomBar button { border:0; border-radius:16px; padding:6px 12px; background:rgba(255,255,255,.18); color:#fff; font-size:15px; font-weight:600; }
+  #zoomBar button.on { background:#ffd60a; color:#000; }
+  #focusRing { position:absolute; width:70px; height:70px; border:2px solid #ffd60a; border-radius:6px; pointer-events:none; opacity:0; transition:opacity .3s; transform:translate(-50%,-50%); }
+  #camHint { color:#bbb; font-size:12px; text-align:center; background:#000; padding-bottom:2px; }
   #flashFx { position:fixed; inset:0; background:#fff; opacity:0; pointer-events:none; z-index:11; transition:opacity .15s; }
   .tip { font-size:14px; color:var(--muted); }
 </style>
@@ -84,14 +91,16 @@
 
 <div id="camView" class="hidden">
   <div id="camCount">0 photos</div>
-  <video id="vid" playsinline autoplay muted></video>
+  <div id="vidWrap"><video id="vid" playsinline autoplay muted></video><div id="focusRing"></div></div>
+  <div id="zoomBar"><button data-z="1" class="on">1×</button><button data-z="2">2×</button><button data-z="3">3×</button><button data-z="5">5×</button></div>
+  <div id="camHint">Pinch or tap 1×/2×/3× to zoom · tap the picture to focus</div>
   <div id="camBar"><img id="camThumb" alt=""><button id="shutter" aria-label="Take photo"></button><button id="camDone">Done</button></div>
 </div>
 <div id="flashFx"></div>
 <script>
 const OWNER = "exframesp-stack", REPO = "ebay-photos", BRANCH = "main", MAX = 2000;
 const $ = id => document.getElementById(id);
-let queue = [], uploading = false;   // {file, url, taken, state}
+let queue = [], uploading = false, seq = 0;   // {file, url, taken, state}
 const tokenKey = "ebayPhotosToken";
 const getTok = () => { try { return localStorage.getItem(tokenKey) || ""; } catch (e) { return ""; } };
 
@@ -126,19 +135,55 @@ $("test").onclick = async () => {
   $("status").textContent = r.ok ? "Connected to " + OWNER + "/" + REPO + "." : "Not connected (" + r.status + ").";
 };
 
-let stream = null, shots = 0;
+let stream = null, shots = 0, zoom = 1, hwZoom = null;
+function track() { return stream && stream.getVideoTracks()[0]; }
+function setZoom(z) {
+  const t = track(); const caps = t && t.getCapabilities ? t.getCapabilities() : {};
+  if (caps.zoom) {                                   // real camera zoom (sharper)
+    z = Math.max(caps.zoom.min, Math.min(caps.zoom.max, z));
+    t.applyConstraints({ advanced: [{ zoom: z }] }).catch(() => {}); hwZoom = true;
+    $("vid").style.transform = "";
+  } else {                                           // digital zoom: crop the full-resolution frame
+    z = Math.max(1, Math.min(5, z)); hwZoom = false;
+    $("vid").style.transform = "scale(" + z + ")";
+  }
+  zoom = z;
+  document.querySelectorAll("#zoomBar button").forEach(b => b.classList.toggle("on", Math.abs(+b.dataset.z - z) < .05));
+}
+document.querySelectorAll("#zoomBar button").forEach(b => b.onclick = () => setZoom(+b.dataset.z));
+let pinch0 = null, zoom0 = 1;
+$("vidWrap").addEventListener("touchstart", e => { if (e.touches.length === 2) { pinch0 = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY); zoom0 = zoom; } }, { passive: true });
+$("vidWrap").addEventListener("touchmove", e => { if (e.touches.length === 2 && pinch0) { const d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY); setZoom(zoom0 * d / pinch0); } }, { passive: true });
+$("vidWrap").addEventListener("touchend", e => { if (e.touches.length < 2) pinch0 = null; });
+$("vidWrap").addEventListener("click", e => {                       // tap to focus
+  const r = $("vidWrap").getBoundingClientRect(), ring = $("focusRing");
+  ring.style.left = (e.clientX - r.left) + "px"; ring.style.top = (e.clientY - r.top) + "px"; ring.style.opacity = 1;
+  setTimeout(() => ring.style.opacity = 0, 800);
+  const t = track(); const caps = t && t.getCapabilities ? t.getCapabilities() : {};
+  const pt = { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height };
+  const adv = {};
+  if (caps.pointsOfInterest !== undefined) adv.pointsOfInterest = [pt];
+  if (caps.focusMode && caps.focusMode.includes("single-shot")) adv.focusMode = "single-shot";
+  else if (caps.focusMode && caps.focusMode.includes("continuous")) adv.focusMode = "continuous";
+  if (Object.keys(adv).length) t.applyConstraints({ advanced: [adv] }).catch(() => {});
+});
 $("cam").onclick = async () => {
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: {
       facingMode: { ideal: "environment" }, width: { ideal: 4032 }, height: { ideal: 3024 } } });
   } catch (e) { $("camIn").click(); return; }      // no live camera: fall back to the phone camera
   $("vid").srcObject = stream; shots = 0; $("camThumb").removeAttribute("src");
+  try { const t = track(), caps = t.getCapabilities ? t.getCapabilities() : {};
+        if (caps.focusMode && caps.focusMode.includes("continuous")) t.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(() => {}); } catch (e) {}
+  setZoom(1);
   $("camCount").textContent = "0 photos"; $("camView").classList.remove("hidden");
 };
 $("shutter").onclick = () => {
   const v = $("vid"); if (!v.videoWidth) return;
-  const c = document.createElement("canvas"); c.width = v.videoWidth; c.height = v.videoHeight;
-  c.getContext("2d").drawImage(v, 0, 0);
+  const c = document.createElement("canvas");
+  const dz = hwZoom ? 1 : zoom, sw = v.videoWidth / dz, sh = v.videoHeight / dz;
+  c.width = Math.round(sw); c.height = Math.round(sh);
+  c.getContext("2d").drawImage(v, (v.videoWidth - sw) / 2, (v.videoHeight - sh) / 2, sw, sh, 0, 0, sw, sh);
   const fx = $("flashFx"); fx.style.opacity = .8; setTimeout(() => fx.style.opacity = 0, 120);
   const t = Date.now();
   c.toBlob(b => {
@@ -157,12 +202,21 @@ $("lib").onclick = () => $("libIn").click();
 $("camIn").onchange = e => { add(e.target.files); e.target.value = ""; };
 $("libIn").onchange = e => { add(e.target.files); e.target.value = ""; };
 
+const SENT = "ebayPhotosSent";
+const fp = f => f.name + "|" + f.size + "|" + f.lastModified;
+function sentSet() { try { return JSON.parse(localStorage.getItem(SENT) || "{}"); } catch (e) { return {}; } }
+function markSent(f) { const s = sentSet(), now = Date.now(); s[fp(f)] = now;
+  for (const k in s) if (now - s[k] > 14 * 864e5) delete s[k];
+  try { localStorage.setItem(SENT, JSON.stringify(s)); } catch (e) {} }
 function add(files) {
+  const sent = sentSet(); let skipped = 0;
   for (const f of files) {
+    if (queue.some(q => fp(q.file) === fp(f)) || sent[fp(f)]) { skipped++; continue; }
     // camera photos: lastModified = moment taken; keeps pairs grouped by time
     queue.push({ file: f, url: URL.createObjectURL(f), taken: f.lastModified || Date.now(), state: "wait" });
   }
   draw();
+  if (skipped) $("status").textContent = skipped + " duplicate photo" + (skipped > 1 ? "s" : "") + " skipped.";
 }
 
 function draw() {
@@ -205,7 +259,8 @@ function nameFor(q, n) {
   const d = new Date(q.taken);
   const day = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   const t = `${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}-${String(d.getMilliseconds()).padStart(3, "0")}`;
-  return `inbox/${day}/${t}-${Math.random().toString(36).slice(2, 6)}.jpg`;
+  seq = (seq + 1) % 1000;
+  return `inbox/${day}/${t}-${String(seq).padStart(3, "0")}${Math.random().toString(36).slice(2, 4)}.jpg`;
 }
 
 $("clear").onclick = () => {
@@ -227,7 +282,7 @@ $("up").onclick = async () => {
         const r = await api("PUT", "/contents/" + nameFor(q), { message: "photo " + new Date(q.taken).toISOString(), branch: BRANCH, content });
         ok = r.ok; if (!ok) await new Promise(z => setTimeout(z, 2000));
       }
-      q.state = ok ? "done" : "fail"; ok ? sent++ : failed++;
+      q.state = ok ? "done" : "fail"; if (ok) { sent++; markSent(q.file); } else failed++;
     } catch (e) { q.state = "fail"; failed++; }
     $("prog").style.width = Math.round(100 * (sent + failed) / todo.length) + "%";
     draw();
