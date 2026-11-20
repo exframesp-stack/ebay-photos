@@ -27,6 +27,7 @@
   .grid div { position:relative; aspect-ratio:1; border-radius:8px; overflow:hidden; background:#f1f3f5; }
   .grid img { width:100%; height:100%; object-fit:cover; }
   .grid span { position:absolute; inset:auto 0 0 0; font-size:11px; text-align:center; background:rgba(255,255,255,.85); }
+  .grid .del { position:absolute; top:3px; right:3px; width:28px; height:28px; border:0; border-radius:50%; background:rgba(0,0,0,.65); color:#fff; font-size:18px; line-height:28px; padding:0; }
   .grid .done span { color:var(--ok); } .grid .fail span { color:var(--bad); }
   .bar { height:8px; background:#f1f3f5; border-radius:4px; overflow:hidden; margin:8px 0; }
   .bar i { display:block; height:100%; width:0; background:var(--ok); transition:width .2s; }
@@ -58,6 +59,7 @@
 
     <div class="count" id="count">No photos waiting.</div>
     <div class="grid" id="grid"></div>
+    <button class="btn secondary hidden" id="clear">Delete all waiting photos</button>
     <div class="bar"><i id="prog"></i></div>
     <button class="btn upload" id="up" disabled>Upload</button>
     <div id="status"></div>
@@ -73,7 +75,7 @@
 <script>
 const OWNER = "exframesp-stack", REPO = "ebay-photos", BRANCH = "main", MAX = 2000;
 const $ = id => document.getElementById(id);
-let queue = [];   // {file, url, taken, state}
+let queue = [], uploading = false;   // {file, url, taken, state}
 const tokenKey = "ebayPhotosToken";
 const getTok = () => { try { return localStorage.getItem(tokenKey) || ""; } catch (e) { return ""; } };
 
@@ -124,12 +126,16 @@ function add(files) {
 function draw() {
   const waiting = queue.filter(q => q.state !== "done").length;
   $("count").textContent = waiting ? waiting + " photo" + (waiting > 1 ? "s" : "") + " waiting to upload." : "No photos waiting.";
-  $("up").disabled = !waiting;
+  $("up").disabled = !waiting || uploading;
+  $("clear").classList.toggle("hidden", !waiting || uploading);
   $("grid").innerHTML = "";
   queue.forEach((q, i) => {
     const d = document.createElement("div");
     d.className = q.state;
-    d.innerHTML = `<img src="${q.url}"><span>${q.state === "done" ? "✓ sent" : q.state === "fail" ? "retry" : q.state === "busy" ? "…" : i + 1}</span>`;
+    d.innerHTML = `<img src="${q.url}"><span>${q.state === "done" ? "✓ sent" : q.state === "fail" ? "retry" : q.state === "busy" ? "…" : i + 1}</span>` +
+      (q.state === "wait" || q.state === "fail" ? `<button class="del" aria-label="Delete photo">×</button>` : "");
+    const b = d.querySelector(".del");
+    if (b) b.onclick = ev => { ev.stopPropagation(); if (uploading) return; URL.revokeObjectURL(q.url); queue.splice(queue.indexOf(q), 1); draw(); };
     $("grid").appendChild(d);
   });
 }
@@ -160,8 +166,14 @@ function nameFor(q, n) {
   return `inbox/${day}/${t}-${Math.random().toString(36).slice(2, 6)}.jpg`;
 }
 
+$("clear").onclick = () => {
+  if (uploading || !confirm("Delete all photos waiting to upload?")) return;
+  queue.filter(q => q.state !== "done").forEach(q => URL.revokeObjectURL(q.url));
+  queue = queue.filter(q => q.state === "done"); draw();
+};
+
 $("up").onclick = async () => {
-  $("up").disabled = true; $("cam").disabled = $("lib").disabled = true;
+  uploading = true; $("up").disabled = true; $("cam").disabled = $("lib").disabled = true;
   const todo = queue.filter(q => q.state !== "done");
   let sent = 0, failed = 0;
   for (const q of todo) {
@@ -180,7 +192,7 @@ $("up").onclick = async () => {
   }
   $("status").textContent = failed ? `${sent} sent, ${failed} failed — tap Upload to retry.` : `All ${sent} photos sent.`;
   if (!failed) { queue.forEach(q => URL.revokeObjectURL(q.url)); queue = []; setTimeout(() => { $("prog").style.width = "0"; draw(); }, 1500); }
-  $("cam").disabled = $("lib").disabled = false; draw();
+  uploading = false; $("cam").disabled = $("lib").disabled = false; draw();
 };
 
 show(); draw();
